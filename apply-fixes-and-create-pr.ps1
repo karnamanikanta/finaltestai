@@ -179,15 +179,111 @@ function Get-InlineScriptBlocks {
             $bodyText = ($body -join "`n")
             if ($bodyText -match '(?im)(^\s*\$\w+\s*=|\bGet-Content\b|\bSet-Content\b|\$Env:|-replace\b|\bWrite-Host\b|\bInvoke-RestMethod\b|\bParam\s*\()') { $isPowerShell = $true }
             if ($bodyText -match '(?m)^\s*#!/usr/bin/env bash|^\s*#!/bin/(ba)?sh') { $isPowerShell = $false }
-            $blocks += [PSCustomObject]@{ Body = $bodyText; Kind = $(if ($isPowerShell) { 'powershell' } else { 'bash' }) }
+
+            # ── OS-TARGET DETECTION for bare 'script:' steps (not pwsh/powershell) ──
+            # PORTED FROM ai-triage-engine.ps1 (BUGFIX): this block was missing
+            # entirely from the original port, which meant every bare 'script:'
+            # step here was always treated as bash, even on a Windows-targeted
+            # job where ADO actually runs it through cmd.exe (batch syntax).
+            # That mismatch would cause Test-SyntaxOk to validate batch code
+            # with `bash -n`/shellcheck -- either false-rejecting a valid fix
+            # or false-accepting broken batch that happens to parse as bash.
+            # Mirrors the engine's full-prefix scan (not just an 8-line
+            # lookback) since pool:/vmImage: can be set once at the top of the
+            # pipeline and apply to every job below it.
+            $kindOverride = $null
+            if (-not $isPowerShell) {
+                $fullPrefix = ($lines[0..$i] -join "`n")
+                $vmImageMatches = [regex]::Matches($fullPrefix, '(?im)vmImage:\s*[''"]?([a-zA-Z0-9_.\-]+)[''"]?')
+                $demandMatches  = [regex]::Matches($fullPrefix, '(?im)Agent\.OS\s*-equals\s*(\w+)')
+                $isWindowsTarget = $false
+                if ($vmImageMatches.Count -gt 0) {
+                    $isWindowsTarget = $vmImageMatches[$vmImageMatches.Count - 1].Groups[1].Value -match '(?i)windows'
+                } elseif ($demandMatches.Count -gt 0) {
+                    $isWindowsTarget = $demandMatches[$demandMatches.Count - 1].Groups[1].Value -eq 'Windows_NT'
+                }
+                if ($isWindowsTarget) { $kindOverride = 'cmd' }
+            }
+
+            $kind = if ($isPowerShell) { 'powershell' } elseif ($null -ne $kindOverride) { $kindOverride } else { 'bash' }
+            $blocks += [PSCustomObject]@{ Body = $bodyText; Kind = $kind }
             $i = $j
         } else { $i++ }
     }
     return $blocks
 }
 
+# PORTED FROM ai-triage-engine.ps1 (BUGFIX): this validator did not exist
+# anywhere in the remediator. Without it, the 'cmd' kind now produced by
+# Get-InlineScriptBlocks above had nowhere to go -- this is the actual
+# syntax oracle for batch/cmd.exe inline script blocks (paren-block
+# nesting via IF/FOR, "" double-quote escaping, :: comment lines).
+function Test-BatchSyntax {
+    param([string]$content)
+    $parenDepth = 0
+    $inDouble = $false
+    $lineNum = 1
+    $parenOpenLine = 0
+    $atLineStart = $true
+
+    $i = 0
+    while ($i -lt $content.Length) {
+        $c = $content[$i]
+        $nc = if ($i + 1 -lt $content.Length) { $content[$i + 1] } else { '' }
+
+        if ($c -eq "`n") { $lineNum++; $atLineStart = $true; $i++; continue }
+
+        if ($inDouble) {
+            if ($c -eq '"' -and $nc -eq '"') { $i += 2; continue }   # "" escape -- batch's real convention
+            if ($c -eq '"') { $inDouble = $false }
+            $atLineStart = $false; $i++; continue
+        }
+
+        # '::' double-colon comment — only recognized as the first token on
+        # a line (the common batch REM-comment idiom); skip to end of line.
+        if ($atLineStart -and $c -eq ':' -and $nc -eq ':') {
+            $nl = $content.IndexOf("`n", $i)
+            $i = if ($nl -ge 0) { $nl } else { $content.Length }
+            continue
+        }
+
+        if ($c -ne ' ' -and $c -ne "`t") { $atLineStart = $false }
+
+        if ($c -eq '"') { $inDouble = $true; $i++; continue }
+        if ($c -eq '(') {
+            if ($parenDepth -eq 0) { $parenOpenLine = $lineNum }
+            $parenDepth++; $i++; continue
+        }
+        if ($c -eq ')') {
+            $parenDepth--
+            if ($parenDepth -lt 0) {
+                return @{Ok=$false;Message="Batch: unmatched closing ')' on line $lineNum";Line=$lineNum}
+            }
+            $i++; continue
+        }
+        $i++
+    }
+
+    if ($inDouble) {
+        return @{Ok=$false;Message="Batch: unterminated double-quoted string — never closed before end of file";Line=$lineNum}
+    }
+    if ($parenDepth -ne 0) {
+        return @{Ok=$false;Message="Batch: $parenDepth parenthesis/parentheses opened around line $parenOpenLine (likely an IF/FOR block) never closed";Line=$parenOpenLine}
+    }
+    return @{Ok=$true;Message="";Line=0}
+}
+
+# Boolean wrapper matching this file's Test-PowerShellOk/Test-BashOk convention,
+# so the Get-InlineScriptBlocks 'cmd' kind can be checked the same way as the
+# other two kinds at the Test-SyntaxOk call site.
+function Test-BatchOk {
+    param([string]$content)
+    return (Test-BatchSyntax -content $content).Ok
+}
+
 function Test-DockerfileSyntax {
     param([string]$content)
+
     $lines = $content -split "\r?\n"
 
     # Confirmed against Docker's own complete instruction reference.
@@ -923,6 +1019,17 @@ function Test-SyntaxOk {
         if ($filePath -match '\.ya?ml$') {
             foreach ($b in (Get-InlineScriptBlocks -yamlContent $content)) {
                 if ($b.Kind -eq 'powershell') { if (-not (Test-PowerShellOk $b.Body)){$ok=$false;break}; continue }
+                if ($b.Kind -eq 'cmd') {
+                    # BUGFIX: 'cmd' is a real Kind value now that Get-InlineScriptBlocks
+                    # has been ported to include OS-target detection (see that function's
+                    # comment). Previously every non-powershell block fell into the bash
+                    # path below regardless of Kind, which meant a Windows-targeted
+                    # script: step (batch syntax) was checked with `bash -n`/shellcheck --
+                    # wrong validator for the language. Deliberately does NOT run the
+                    # shellcheck/macro-neutralization pass below; that's bash-specific.
+                    if (-not (Test-BatchOk $b.Body)) { $ok=$false; break }
+                    continue
+                }
                 # bash -n runs on RAW content (just checks bash syntax, ADO macros are valid command substitutions)
                 $bf="$tmp.sh"; [System.IO.File]::WriteAllText($bf,$b.Body,[System.Text.Encoding]::UTF8)
                 if ($script:hasBashRT) {
@@ -978,7 +1085,7 @@ function Test-SyntaxOk {
             }
         } elseif ($filePath -match '\.ps1$') { $ok=(Test-PowerShellOk $content) }
         elseif ($filePath -match '\.sh$') { $bf="$tmp.sh"; [System.IO.File]::WriteAllText($bf,$content,[System.Text.Encoding]::UTF8); $ok=(Test-BashOk $bf); Remove-Item $bf -Force -EA SilentlyContinue }
-        elseif ($filePath -match '(?i)(Fastfile|Gemfile|\.rb)$') {
+        elseif ($filePath -match '(?i)(Fastfile|Gemfile|Podfile|Appfile|Matchfile|Gymfile|Scanfile|Deliverfile|Screengrabfile|Dangerfile|Mintfile|\.rb|\.gemspec|\.podspec|\.rake)$') {
             if ($script:hasRubyRT) { $bf="$tmp.rb"; [System.IO.File]::WriteAllText($bf,$content); ruby -c $bf 2>$null; $ok=($LASTEXITCODE -eq 0); Remove-Item $bf -Force -EA SilentlyContinue }
             else { $ok=(Test-StructuralOk $content 'ruby') }   # BUGFIX: ruby was called unconditionally; see top-of-file note.
         }
@@ -1091,7 +1198,7 @@ function Test-SyntaxOk {
                 if ([string]::IsNullOrWhiteSpace($ml) -or $ml.TrimStart().StartsWith('#')) { $afterTarget = $false }
             }
         }
-        elseif ($filePath -match '(?i)(build\.gradle|settings\.gradle)$') {
+        elseif ($filePath -match '(?i)(build\.gradle|settings\.gradle|gradle\.properties)$') {
             # Ported directly: structural groovy check + the two most
             # common real Android-Gradle DSL mistakes.
             if (-not (Test-StructuralOk $content 'groovy')) { $ok=$false }
@@ -1123,6 +1230,23 @@ function Test-SyntaxOk {
             $vueCheck = Test-VueSyntax -content $content -filePath $filePath
             $ok = $vueCheck.Ok
             if (-not $ok) { $script:lastSyntaxFailReason = $vueCheck.Message }
+        }
+        else {
+            # FAIL-CLOSED SAFETY NET (BUGFIX): $ok defaults to $true at the top
+            # of this function, and this elseif chain previously had no final
+            # else. Any file type that fell through every branch above --
+            # e.g. gradle.properties and most of the Fastlane/CocoaPods family
+            # before this fix, or any future file type the triage engine
+            # grows support for before this remediator is updated to match --
+            # was silently reported as VALID with zero actual re-validation.
+            # That is exactly backwards for an independent safety check: an
+            # unrecognized file type must BLOCK the fix, not wave it through.
+            # If this fires in practice, it means ai-triage-engine.ps1 has
+            # started fixing a file type this script doesn't yet know how to
+            # re-validate -- add a matching branch above rather than relying
+            # on this fallback long-term.
+            $ok = $false
+            $script:lastSyntaxFailReason = "No re-validator registered in apply-fixes-and-create-pr.ps1 for this file type ('$filePath') -- refusing to trust an unverified fix. Add a Test-SyntaxOk branch for this extension to proceed."
         }
     } finally { $ErrorActionPreference = $oldEA }
     return $ok
