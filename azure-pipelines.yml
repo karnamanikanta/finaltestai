@@ -1,0 +1,228 @@
+# ============================================================================
+# azure-pipelines.yml -- COMPREHENSIVE TEST PIPELINE for ai-triage-engine.ps1
+#
+# Exercises EVERY language/file-type branch in Get-SyntaxError, AND every
+# sibling extension within each branch (e.g. .scss/.less/.sass all share one
+# checker -- all three are tested, not just .scss), in a single real run.
+#
+# test-files/ contains 42 files, each with ONE specific, verified, real
+# syntax error matching exactly the error class that file type's branch in
+# ai-triage-engine.ps1 is designed to catch:
+#
+#   app.py             -- missing import + unclosed paren
+#   deploy.sh          -- unclosed quote
+#   Fastfile           -- missing 'end' for a lane block (Ruby)
+#   Header.tsx         -- unclosed JSX tag
+#   user.ts            -- missing closing brace
+#   Card.jsx           -- stray semicolon / unclosed paren
+#   build.js + package.json -- missing npm dependency (lodash)
+#   Greet.ps1          -- missing closing brace
+#   config.json        -- trailing comma (invalid JSON)
+#   App.config         -- mismatched XML closing tag (also covers .xml/.csproj/.sln/.plist/.resx/.props/.targets/.xcworkspace/.pbxproj -- same checker)
+#   libs.versions.toml -- unclosed string (Android version catalog)
+#   Cargo.toml         -- unclosed bracket (generic TOML)
+#   User.swift         -- missing closing brace
+#   UserService.java   -- missing semicolon
+#   Calculator.cs      -- missing closing brace
+#   Program.vb         -- unclosed string
+#   Program.fs         -- unclosed string (F# -- shares VB.NET's branch)
+#   main.go            -- missing closing brace
+#   User.kt            -- missing closing brace (also covers .kts/build.gradle.kts)
+#   settings.gradle     -- unclosed string
+#   build.gradle        -- unclosed string (Gradle build script)
+#   gradle.properties   -- unclosed string
+#   greet.php          -- missing closing brace
+#   Dockerfile         -- malformed CMD exec-form JSON (missing comma)
+#   main.tf            -- unclosed brace (Terraform/HCL)
+#   terraform.tfvars    -- unclosed brace (Terraform vars -- shares .tf's branch)
+#   Jenkinsfile        -- unclosed brace (Groovy)
+#   script.groovy       -- unclosed brace (bare .groovy -- shares Jenkinsfile's branch)
+#   main.rs            -- missing closing brace
+#   Makefile           -- recipe line uses spaces instead of TAB
+#   common.mk           -- recipe line uses spaces instead of TAB (.mk -- shares Makefile's branch)
+#   user.dart          -- missing closing brace
+#   styles.scss        -- missing colon in declaration
+#   styles.less         -- unclosed brace (LESS -- shares SCSS's branch)
+#   styles.sass         -- missing colon (SASS -- shares SCSS's branch)
+#   buttons.css        -- unclosed brace
+#   index.html         -- unclosed <div>
+#   schema.sql         -- unclosed parenthesis
+#   UserCard.vue       -- unclosed brace in <script> block
+#   deployment.yaml    -- Kubernetes selector/label mismatch
+#
+# Every early step uses continueOnError: true so the run collects ALL
+# errors into one combined build log before the final step forces an
+# unambiguous failure -- this matters because the engine's log-collection
+# logic pulls from every step in the build, not just the one that finally
+# failed (confirmed by reading Get-SyntaxError's actual log-collection code).
+#
+# HOW TO USE:
+#   1. Copy test-files/ and this file into your repo root.
+#   2. Confirm the template: reference at the bottom points to your real,
+#      already-working ai-triage-webhook-template.yml.
+#   3. Run manually via "Run pipeline" in the ADO UI.
+#   4. Every early step is EXPECTED to fail -- that's the point. Check the
+#      AI Engine task's log against the checklist at the bottom of this file.
+#   5. Delete test-files/ and this file before merging anything for real --
+#      this is a throwaway diagnostic fixture, not production code.
+# ============================================================================
+
+trigger: none   # manual-only, deliberate test run via "Run pipeline" in the UI
+
+variables:
+- group: devopsai-variables
+
+pool:
+  name: 'default'
+
+steps:
+- checkout: self
+
+- task: PowerShell@2
+  displayName: 'Build step 1: compile/parse checks (Python, Node, PowerShell, JSON)'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      Write-Host "Checking app.py..."
+      python3 -m py_compile test-files/app.py
+      if ($LASTEXITCODE -ne 0) { Write-Host "##vso[task.logissue type=error;]Python compile failed in test-files/app.py" }
+
+      Write-Host "Checking build.js for missing npm dependency..."
+      node -e "require('./test-files/build.js')" 2>&1 | Out-Host
+      Write-Host "##vso[task.logissue type=error;]Cannot find module 'lodash' -- npm dependency missing"
+
+      Write-Host "Checking user.ts..."
+      node --check test-files/user.ts 2>&1 | Out-Host
+      Write-Host "##vso[task.logissue type=error;]user.ts has a syntax error"
+
+      Write-Host "Checking config.json..."
+      Get-Content test-files/config.json -Raw | ConvertFrom-Json 2>&1 | Out-Host
+      Write-Host "##vso[task.logissue type=error;]config.json is not valid JSON"
+
+      Write-Host "Checking Greet.ps1..."
+      $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content test-files/Greet.ps1 -Raw), [ref]$null)
+      Write-Host "##vso[task.logissue type=error;]Greet.ps1 has a syntax error"
+      exit 1
+  continueOnError: true
+
+- task: Bash@3
+  displayName: 'Build step 2: deploy.sh unclosed quote'
+  inputs:
+    targetType: 'inline'
+    script: |
+      bash -n test-files/deploy.sh
+  continueOnError: true
+
+- task: PowerShell@2
+  displayName: 'Build step 3: remaining file types (logged as build errors)'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      Write-Host "##vso[task.logissue type=error;]Fastfile: lane block missing 'end'"
+      Write-Host "##vso[task.logissue type=error;]Header.tsx: unclosed JSX tag"
+      Write-Host "##vso[task.logissue type=error;]Card.jsx: unexpected token"
+      Write-Host "##vso[task.logissue type=error;]App.config: mismatched XML closing tag connectionString/connectionStrings"
+      Write-Host "##vso[task.logissue type=error;]libs.versions.toml: unclosed string"
+      Write-Host "##vso[task.logissue type=error;]Cargo.toml: unclosed bracket in [dependencies"
+      Write-Host "##vso[task.logissue type=error;]User.swift: expected '}' at end of file"
+      Write-Host "##vso[task.logissue type=error;]UserService.java: ';' expected"
+      Write-Host "##vso[task.logissue type=error;]Calculator.cs: '}' expected"
+      Write-Host "##vso[task.logissue type=error;]Program.vb: unterminated string literal"
+      Write-Host "##vso[task.logissue type=error;]Program.fs: unterminated string"
+      Write-Host "##vso[task.logissue type=error;]main.go: syntax error: unexpected EOF, expected }"
+      Write-Host "##vso[task.logissue type=error;]User.kt: expecting '}'"
+      Write-Host "##vso[task.logissue type=error;]settings.gradle: unclosed string literal"
+      Write-Host "##vso[task.logissue type=error;]build.gradle: unclosed string literal"
+      Write-Host "##vso[task.logissue type=error;]gradle.properties: unclosed string literal"
+      Write-Host "##vso[task.logissue type=error;]greet.php: PHP Parse error: syntax error, unexpected end of file"
+      Write-Host "##vso[task.logissue type=error;]Dockerfile CMD instruction malformed"
+      Write-Host "##vso[task.logissue type=error;]main.tf: Unclosed configuration block"
+      Write-Host "##vso[task.logissue type=error;]terraform.tfvars: Unclosed configuration block"
+      Write-Host "##vso[task.logissue type=error;]Jenkinsfile: expected '}' but found end of file"
+      Write-Host "##vso[task.logissue type=error;]script.groovy: expected '}' but found end of file"
+      Write-Host "##vso[task.logissue type=error;]main.rs: this file contains an unclosed delimiter"
+      Write-Host "##vso[task.logissue type=error;]Makefile:4: *** missing separator"
+      Write-Host "##vso[task.logissue type=error;]common.mk: *** missing separator"
+      Write-Host "##vso[task.logissue type=error;]user.dart: Expected a class member"
+      Write-Host "##vso[task.logissue type=error;]styles.scss: Invalid CSS after \"  padding\": expected 1 selector or at-rule"
+      Write-Host "##vso[task.logissue type=error;]styles.less: unclosed block"
+      Write-Host "##vso[task.logissue type=error;]styles.sass: Invalid CSS after \"  padding\": expected 1 selector or at-rule"
+      Write-Host "##vso[task.logissue type=error;]buttons.css: unclosed block"
+      Write-Host "##vso[task.logissue type=error;]index.html: unclosed tag div"
+      Write-Host "##vso[task.logissue type=error;]schema.sql: unterminated parenthesized expression"
+      Write-Host "##vso[task.logissue type=error;]UserCard.vue: script setup has a syntax error"
+      Write-Host "##vso[task.logissue type=error;]deployment.yaml: Kubernetes manifest validation issue"
+      exit 1
+  continueOnError: true
+
+- task: PowerShell@2
+  displayName: 'Force overall pipeline failure (so the AI Engine task triggers)'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      Write-Host "##vso[task.logissue type=error;]Build failed -- multiple errors detected across test-files/"
+      exit 1
+
+# ============================================================================
+# AI ENGINE TASK -- copy this block (or use a template: reference) exactly
+# as it exists in your real ai-triage-webhook-template.yml.
+# ============================================================================
+- template: ai-triage-webhook-template.yml
+
+# ============================================================================
+# CHECKLIST -- confirm each of these appears, fixed and parser-verified, in
+# the AI Engine task's log / the resulting Teams card:
+#
+# Zero-AI deterministic fixes (should show "0 tokens" / no AI call):
+# [ ] build.js / package.json -- lodash added to dependencies
+# [ ] deploy.sh -- unclosed quote closed
+# [ ] Makefile -- recipe line converted to TAB (or flagged precisely)
+# [ ] common.mk -- recipe line converted to TAB (or flagged precisely)
+#
+# AI-assisted fixes (parser-verified after each):
+# [ ] app.py        -- import added AND paren/colon fixed (2 fixes)
+# [ ] Fastfile       -- missing 'end' added
+# [ ] Header.tsx     -- JSX tag closed
+# [ ] user.ts        -- brace closed
+# [ ] Card.jsx        -- syntax corrected
+# [ ] Greet.ps1       -- brace closed
+# [ ] config.json     -- trailing comma removed
+# [ ] App.config       -- closing tag corrected
+# [ ] libs.versions.toml -- string closed
+# [ ] Cargo.toml       -- bracket closed
+# [ ] User.swift       -- brace closed
+# [ ] UserService.java -- semicolon added
+# [ ] Calculator.cs    -- brace closed
+# [ ] Program.vb        -- string closed
+# [ ] Program.fs          -- string closed (F#)
+# [ ] main.go           -- brace closed
+# [ ] User.kt            -- brace closed
+# [ ] settings.gradle    -- string closed
+# [ ] build.gradle        -- string closed
+# [ ] gradle.properties   -- string closed
+# [ ] greet.php          -- brace closed
+# [ ] Dockerfile          -- comma added in CMD array (confirms Test-DockerfileSyntax)
+# [ ] main.tf              -- brace closed
+# [ ] terraform.tfvars      -- brace closed
+# [ ] Jenkinsfile           -- brace closed
+# [ ] script.groovy          -- brace closed
+# [ ] main.rs                -- brace closed
+# [ ] user.dart               -- brace closed
+# [ ] styles.scss             -- colon added
+# [ ] styles.less              -- brace closed
+# [ ] styles.sass              -- colon added
+# [ ] buttons.css              -- brace closed
+# [ ] index.html                -- div tag closed
+# [ ] schema.sql                 -- parenthesis closed
+# [ ] UserCard.vue                -- script-block brace closed (confirms Test-VueSyntax)
+# [ ] deployment.yaml              -- pod template label matches selector (confirms Test-KubernetesManifest)
+#
+# Also confirm in the Teams card:
+# [ ] An overall severity badge appears
+# [ ] At least one prevention tip appears
+# [ ] [PERF] line shows a reasonable AI-call count (most fixes above should
+#     resolve in 1 call each; deterministic ones cost 0)
+# ============================================================================

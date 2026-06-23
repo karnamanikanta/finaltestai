@@ -1,0 +1,33 @@
+steps:
+- task: PowerShell@2
+  condition: failed()
+  displayName: '🧠 AI Engine: Iterative Parser-Anchored Repair'
+  env:
+    AZURE_OPENAI_KEY: $(AZURE_OPENAI_KEY)
+    AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+    AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+    AOAI_API_FAMILY: $(AOAI_API_FAMILY)
+    GEMINI_API_KEY: $(GEMINI_API_KEY)
+    POWER_AUTOMATE_WEBHOOK: $(POWER_AUTOMATE_WEBHOOK)
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    BUILD_REPOSITORY_PROVIDER: $(Build.Repository.Provider)
+    DEFAULT_ALERT_EMAIL: $(DEFAULT_ALERT_EMAIL)
+  inputs:
+    targetType: 'filePath'
+    filePath: '$(Build.SourcesDirectory)/ai-triage-engine.ps1'
+    pwsh: true
+- task: PublishPipelineArtifact@1
+  condition: and(always(), ne(variables['AiPayloadPath'], ''))
+  displayName: 'Publish AI Fixes & Debug Artifact'
+  inputs:
+    targetPath: '$(AiPayloadPath)'
+    artifact: 'AIFixPayload-$(Build.BuildId)'
+    publishLocation: 'pipeline'
+
+- task: PublishPipelineArtifact@1
+  condition: and(always(), ne(variables['AiMemoryPath'], ''))
+  displayName: 'Publish AI Fix-Memory'
+  inputs:
+    targetPath: '$(AiMemoryPath)'
+    artifact: 'ai-fix-memory'
+    publishLocation: 'pipeline'

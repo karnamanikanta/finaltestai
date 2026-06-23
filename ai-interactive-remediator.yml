@@ -1,0 +1,42 @@
+name: AI-Remediation-Bot-$(Rev:r)
+trigger: none
+
+# ── AGENT POOL ────────────────────────────────────────────────────────────
+# MUST stay hardcoded — ${{ expressions }} in vmImage: cause ADO to return
+# "A template expression is not allowed in this context" (the 400 error).
+pool:
+  name: 'Default'
+
+steps:
+- checkout: self
+  persistCredentials: true
+  fetchDepth: 0
+  clean: false
+
+- task: DownloadPipelineArtifact@2
+  displayName: '📥 Download AI Payload'
+  inputs:
+    buildType: 'specific'
+    project: '$(System.TeamProjectId)'
+    definition: '$(FailedDefinitionId)'
+    buildVersionToDownload: 'specific'
+    pipelineId: '$(FailedBuildId)'
+    artifactName: 'AIFixPayload-$(FailedBuildId)'
+    targetPath: '$(System.DefaultWorkingDirectory)/AIFixPayload'
+
+- task: PowerShell@2
+  displayName: '🛠️ Apply All Fixes, Parser-Validate & Create PR'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  inputs:
+    targetType: 'filePath'
+    filePath: '$(Build.SourcesDirectory)/apply-fixes-and-create-pr.ps1'
+    pwsh: true
+
+- task: PublishPipelineArtifact@1
+  condition: and(always(), ne(variables['AnalyticsPath'], ''))
+  displayName: 'Publish Remediation Analytics'
+  inputs:
+    targetPath: '$(AnalyticsPath)'
+    artifact: 'ai-remediation-analytics-$(Build.BuildId)'
+    publishLocation: 'pipeline'

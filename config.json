@@ -1,0 +1,7 @@
+{
+  "name": "config",
+  "settings": {
+    "retries": 3,
+    "timeout": 30,
+  }
+}
