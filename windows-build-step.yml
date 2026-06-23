@@ -1,0 +1,15 @@
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+-
+  script: |
+    echo Starting Windows packaging step
+    if exist "%BUILD_ARTIFACTSTAGINGDIRECTORY%" (
+      echo Artifact staging directory found
+      for %%f in (*.zip) do (
+        echo Found archive %%f
+        copy %%f "%BUILD_ARTIFACTSTAGINGDIRECTORY%"
+    )
+    echo Done packaging
+  displayName: 'Package build output (Windows batch)'
